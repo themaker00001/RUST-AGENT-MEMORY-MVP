@@ -1,0 +1,10 @@
+[package]
+name = "memory-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+serde.workspace = true
+uuid.workspace = true

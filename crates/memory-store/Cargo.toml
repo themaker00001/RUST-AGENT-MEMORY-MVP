@@ -1,0 +1,13 @@
+[package]
+name = "memory-store"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+memory-core.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+uuid.workspace = true

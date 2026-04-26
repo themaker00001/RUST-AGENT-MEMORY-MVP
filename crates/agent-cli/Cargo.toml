@@ -1,0 +1,16 @@
+[package]
+name = "agent-memory"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+context-builder.workspace = true
+dotenvy.workspace = true
+memory-core.workspace = true
+memory-retriever.workspace = true
+memory-store.workspace = true
+ollama-client.workspace = true
+tokio.workspace = true
