@@ -1,6 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use tokio_stream::StreamExt;
 
 #[derive(Debug, Clone)]
 pub struct OllamaClient {
@@ -141,6 +142,44 @@ impl OllamaClient {
             .context("failed to parse Ollama generate response")?;
 
         Ok(body.response.trim().to_string())
+    }
+
+    pub async fn generate_stream(
+        &self,
+        prompt: &str,
+    ) -> Result<impl tokio_stream::Stream<Item = Result<String>>> {
+        let response = self
+            .http
+            .post(self.endpoint("/api/generate"))
+            .json(&GenerateRequest {
+                model: &self.generate_model,
+                prompt,
+                stream: true,
+            })
+            .send()
+            .await
+            .context("failed to call Ollama generate endpoint")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!("Ollama generate request failed with {status}: {body}");
+        }
+
+        let stream = response.bytes_stream().map(|item| {
+            let bytes = item.context("failed to read stream chunk")?;
+            let s = String::from_utf8_lossy(&bytes);
+            let mut combined_response = String::new();
+            
+            for line in s.lines() {
+                if let Ok(body) = serde_json::from_str::<GenerateResponse>(line) {
+                    combined_response.push_str(&body.response);
+                }
+            }
+            Ok(combined_response)
+        });
+
+        Ok(stream)
     }
 }
 

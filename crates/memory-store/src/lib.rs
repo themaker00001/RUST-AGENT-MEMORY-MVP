@@ -155,6 +155,21 @@ impl SqliteMemoryStore {
 
         Ok(())
     }
+
+    pub async fn delete_memory(&self, id: Uuid) -> Result<()> {
+        sqlx::query(
+            r#"
+            DELETE FROM memories
+            WHERE id = ?;
+            "#,
+        )
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await
+        .context("failed to delete memory")?;
+
+        Ok(())
+    }
 }
 
 fn row_to_memory(row: sqlx::sqlite::SqliteRow) -> Result<MemoryRecord> {

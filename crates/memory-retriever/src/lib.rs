@@ -78,7 +78,7 @@ pub fn retrieve(
     results
 }
 
-fn normalized_cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+pub fn normalized_cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let raw = cosine_similarity(a, b);
     ((raw + 1.0) / 2.0).clamp(0.0, 1.0)
 }

@@ -21,39 +21,34 @@ impl ContextBuilder {
     pub fn build_prompt(&self, user_request: &str, memories: &[RetrievedMemory]) -> String {
         let mut prompt = String::new();
 
-        prompt.push_str("You are an AI agent using an external memory system.\n");
-        prompt.push_str("Use memories only when they are relevant to the current request.\n");
-        prompt.push_str("Do not invent memory details. If memory is missing, say what you can infer from the request only.\n\n");
+        prompt.push_str("### SYSTEM INSTRUCTIONS\n");
+        prompt.push_str("You are the Agent Memory OS. Your primary goal is to provide precise, professional, and high-signal responses based on the local memory context provided below.\n\n");
+        
+        prompt.push_str("### GUIDELINES\n");
+        prompt.push_str("- Speak directly and concisely. Avoid conversational filler like 'I think' or 'Based on memory...'.\n");
+        prompt.push_str("- If a memory identifies the user, refer to them directly (e.g., 'You are Vaibhav' not 'The user is Vaibhav').\n");
+        prompt.push_str("- Maintain a sophisticated, helpful, and technically accurate persona.\n");
+        prompt.push_str("- If memories are irrelevant, prioritize the user's immediate request while acknowledging existing context where appropriate.\n\n");
 
-        if memories.is_empty() {
-            prompt.push_str("Relevant memories: none found.\n\n");
-        } else {
-            prompt.push_str("Relevant memories:\n");
+        if !memories.is_empty() {
+            prompt.push_str("### LOCAL CONTEXT (MEMORIES)\n");
             for (index, retrieved) in memories.iter().enumerate() {
                 let memory = &retrieved.memory;
                 let content = truncate(&memory.content, self.max_memory_chars);
 
                 prompt.push_str(&format!(
-                    "{}. [{} | score {:.3} | semantic {:.3} | confidence {:.2} | importance {:.2}]\n   Tags: {}\n   Memory: {}\n\n",
+                    "[{}] {}: {}\n",
                     index + 1,
-                    memory.memory_type,
-                    retrieved.final_score,
-                    retrieved.semantic_similarity,
-                    memory.confidence,
-                    memory.importance,
-                    if memory.tags.is_empty() {
-                        "none".to_string()
-                    } else {
-                        memory.tags.join(", ")
-                    },
+                    memory.memory_type.to_string().to_uppercase(),
                     content
                 ));
             }
+            prompt.push_str("\n");
         }
 
-        prompt.push_str("Current user request:\n");
+        prompt.push_str("### USER COMMAND\n");
         prompt.push_str(user_request);
-        prompt.push_str("\n\nAnswer:\n");
+        prompt.push_str("\n\n### RESPONSE\n");
         prompt
     }
 }
