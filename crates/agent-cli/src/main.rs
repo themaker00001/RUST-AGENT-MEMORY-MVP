@@ -10,6 +10,7 @@ use ollama_client::OllamaClient;
 use std::env;
 use std::io::{self, Write};
 use tokio_stream::StreamExt;
+use uuid::Uuid;
 
 // TUI Imports
 use ratatui::{
@@ -114,8 +115,26 @@ enum Commands {
         threshold: f32,
     },
 
+    /// Link two memories together.
+    Link {
+        /// Source memory UUID.
+        source_id: String,
+
+        /// Target memory UUID.
+        target_id: String,
+
+        /// Type of relationship (e.g., "related_to", "caused_by", "belongs_to").
+        relation: String,
+    },
+
     /// Open an interactive TUI dashboard.
     Dash,
+
+    /// Execute a shell command and remember its outcome as a 'tool' memory.
+    Exec {
+        /// The shell command to execute.
+        command: String,
+    },
 }
 
 #[tokio::main]
@@ -149,8 +168,18 @@ async fn main() -> Result<()> {
         Commands::Compress { threshold } => {
             app.compress(threshold).await?;
         }
+        Commands::Link {
+            source_id,
+            target_id,
+            relation,
+        } => {
+            app.link(source_id, target_id, relation).await?;
+        }
         Commands::Dash => {
             app.dashboard().await?;
+        }
+        Commands::Exec { command } => {
+            app.exec(&command).await?;
         }
     }
 
@@ -434,6 +463,20 @@ impl App {
         Ok(())
     }
 
+    async fn link(&self, source_id: String, target_id: String, relation: String) -> Result<()> {
+        let source_uuid = Uuid::parse_str(&source_id).context("invalid source UUID")?;
+        let target_uuid = Uuid::parse_str(&target_id).context("invalid target UUID")?;
+
+        self.store.link_memories(source_uuid, target_uuid, &relation).await?;
+
+        println!("{}", "✔ Memories linked".green().bold());
+        println!("  {} {}", "source:".dimmed(), source_id.bright_black());
+        println!("  {} {}", "target:".dimmed(), target_id.bright_black());
+        println!("  {} {}", "relation:".dimmed(), relation.cyan());
+
+        Ok(())
+    }
+
     async fn dashboard(&self) -> Result<()> {
         let memories = self.store.list_memories().await?;
         
@@ -594,6 +637,72 @@ impl App {
         for retrieved in memories {
             self.store.mark_accessed(retrieved.memory.id).await?;
         }
+        Ok(())
+    }
+
+    async fn exec(&self, command: &str) -> Result<()> {
+        let sp = create_spinner(&format!("Executing: {}", command));
+        
+        let output = if cfg!(target_os = "windows") {
+            std::process::Command::new("cmd")
+                .args(["/C", command])
+                .output()?
+        } else {
+            std::process::Command::new("sh")
+                .args(["-c", command])
+                .output()?
+        };
+        sp.finish_and_clear();
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        
+        let mut content = format!("$ {}\n", command);
+        if !stdout.is_empty() {
+            content.push_str("STDOUT:\n");
+            content.push_str(&stdout);
+        }
+        if !stderr.is_empty() {
+            if !stdout.is_empty() {
+                content.push('\n');
+            }
+            content.push_str("STDERR:\n");
+            content.push_str(&stderr);
+        }
+
+        let exit_status = output.status;
+        content.push_str(&format!("\nExit Status: {}", exit_status));
+
+        println!("{}", content.dimmed());
+        
+        if exit_status.success() {
+            println!("{}", "✔ Command executed successfully".green().bold());
+        } else {
+            println!("{}", "✘ Command failed".red().bold());
+        }
+
+        let sp = create_spinner("Creating embedding for command output...");
+        let embedding = self
+            .ollama
+            .embed(&content)
+            .await
+            .context("failed to create memory embedding")?;
+        sp.finish_and_clear();
+
+        let memory = MemoryRecord::new(
+            content,
+            MemoryType::Tool,
+            0.6,
+            0.9,
+            vec!["shell".to_string(), "exec".to_string()],
+            "cli-exec".to_string(),
+            Some(self.ollama.embed_model().to_string()),
+            Some(embedding),
+        );
+
+        self.store.insert_memory(&memory).await?;
+        println!("{}", "✔ Stored tool memory".green().bold());
+        
         Ok(())
     }
 }

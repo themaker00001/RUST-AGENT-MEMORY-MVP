@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use memory_core::{MemoryRecord, MemoryType};
+use memory_core::{MemoryLink, MemoryRecord, MemoryType};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
     Row, SqlitePool,
@@ -67,6 +67,22 @@ impl SqliteMemoryStore {
         .execute(&self.pool)
         .await
         .context("failed to create memory type index")?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS memory_links (
+                source_id TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                relation_type TEXT NOT NULL,
+                PRIMARY KEY (source_id, target_id),
+                FOREIGN KEY (source_id) REFERENCES memories(id) ON DELETE CASCADE,
+                FOREIGN KEY (target_id) REFERENCES memories(id) ON DELETE CASCADE
+            );
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .context("failed to create memory_links table")?;
 
         Ok(())
     }
@@ -169,6 +185,52 @@ impl SqliteMemoryStore {
         .context("failed to delete memory")?;
 
         Ok(())
+    }
+
+    pub async fn link_memories(&self, source_id: Uuid, target_id: Uuid, relation_type: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT OR REPLACE INTO memory_links (source_id, target_id, relation_type)
+            VALUES (?, ?, ?);
+            "#,
+        )
+        .bind(source_id.to_string())
+        .bind(target_id.to_string())
+        .bind(relation_type)
+        .execute(&self.pool)
+        .await
+        .context("failed to link memories")?;
+
+        Ok(())
+    }
+
+    pub async fn get_linked_memories(&self, id: Uuid) -> Result<Vec<MemoryLink>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT source_id, target_id, relation_type
+            FROM memory_links
+            WHERE source_id = ? OR target_id = ?;
+            "#,
+        )
+        .bind(id.to_string())
+        .bind(id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to get linked memories")?;
+
+        rows.into_iter()
+            .map(|row| {
+                let source_id: String = row.get("source_id");
+                let target_id: String = row.get("target_id");
+                let relation_type: String = row.get("relation_type");
+
+                Ok(MemoryLink {
+                    source_id: Uuid::parse_str(&source_id).context("invalid source_id")?,
+                    target_id: Uuid::parse_str(&target_id).context("invalid target_id")?,
+                    relation_type,
+                })
+            })
+            .collect()
     }
 }
 

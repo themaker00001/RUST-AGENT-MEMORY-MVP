@@ -97,3 +97,10 @@ pub struct RetrievedMemory {
     pub confidence_score: f32,
     pub final_score: f32,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryLink {
+    pub source_id: Uuid,
+    pub target_id: Uuid,
+    pub relation_type: String,
+}
