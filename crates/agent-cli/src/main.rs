@@ -3,7 +3,8 @@ use clap::{Parser, Subcommand};
 use colored::*;
 use context_builder::ContextBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
-use memory_core::{MemoryRecord, MemoryType, RetrievedMemory};
+use memory_core::{MemoryLink, MemoryRecord, MemoryType, RetrievedMemory};
+use std::collections::HashMap;
 use memory_retriever::{retrieve, RetrievalOptions, normalized_cosine_similarity};
 use memory_store::SqliteMemoryStore;
 use ollama_client::OllamaClient;
@@ -17,6 +18,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color as TuiColor, Modifier, Style},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, List as TuiList, ListItem, ListState, Paragraph, Wrap},
     Terminal,
 };
@@ -479,24 +481,26 @@ impl App {
 
     async fn dashboard(&self) -> Result<()> {
         let memories = self.store.list_memories().await?;
-        
-        // Setup terminal
+        let all_links = self.store.list_all_links().await?;
+        let memory_map: HashMap<Uuid, &MemoryRecord> =
+            memories.iter().map(|m| (m.id, m)).collect();
+
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
-        // TUI state
         let mut list_state = ListState::default();
         list_state.select(Some(0));
-        let mut active_panel = 0; // 0 = list, 1 = content
-        let mut content_scroll = 0;
+        let mut active_panel: u8 = 0; // 0 = list, 1 = right panel
+        let mut content_scroll: u16 = 0;
+        let mut view_mode = ViewMode::Detail;
 
         loop {
             let memories_ref = &memories;
             let current_index = list_state.selected().unwrap_or(0);
-            
+
             terminal.draw(|f| {
                 let chunks = Layout::default()
                     .direction(Direction::Horizontal)
@@ -505,59 +509,96 @@ impl App {
 
                 // Left: Memory List
                 let items: Vec<ListItem> = memories_ref.iter().map(|m| {
-                    let color = match m.memory_type {
-                        MemoryType::Working => TuiColor::Cyan,
-                        MemoryType::Episodic => TuiColor::Blue,
-                        MemoryType::Semantic => TuiColor::Green,
-                        MemoryType::Tool => TuiColor::Magenta,
-                        MemoryType::Failure => TuiColor::Red,
-                        MemoryType::Preference => TuiColor::Yellow,
-                    };
-                    ListItem::new(format!("{} | {}", m.memory_type.to_string(), m.content.chars().take(30).collect::<String>()))
-                        .style(Style::default().fg(color))
+                    ListItem::new(format!(
+                        "{} | {}",
+                        m.memory_type,
+                        m.content.chars().take(30).collect::<String>()
+                    ))
+                    .style(Style::default().fg(tui_type_color(&m.memory_type)))
                 }).collect();
 
                 let list_block = Block::default()
                     .borders(Borders::ALL)
                     .title(" Memories ")
-                    .border_style(if active_panel == 0 { Style::default().fg(TuiColor::Yellow) } else { Style::default() });
+                    .border_style(if active_panel == 0 {
+                        Style::default().fg(TuiColor::Yellow)
+                    } else {
+                        Style::default()
+                    });
 
                 let list = TuiList::new(items)
                     .block(list_block)
-                    .highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(TuiColor::DarkGray))
+                    .highlight_style(
+                        Style::default().add_modifier(Modifier::BOLD).bg(TuiColor::DarkGray),
+                    )
                     .highlight_symbol(">> ");
-                
+
                 f.render_stateful_widget(list, chunks[0], &mut list_state);
 
-                // Right: Details
+                // Right: Detail or Graph
                 if let Some(m) = memories_ref.get(current_index) {
-                    let details_chunks = Layout::default()
-                        .direction(Direction::Vertical)
-                        .constraints([Constraint::Length(7), Constraint::Min(0)].as_ref())
-                        .split(chunks[1]);
+                    let right_border = if active_panel == 1 {
+                        Style::default().fg(TuiColor::Yellow)
+                    } else {
+                        Style::default()
+                    };
 
-                    let stats = format!(
-                        "ID:         {}\nType:       {}\nImportance: {:.2}\nConfidence: {:.2}\nTags:       {}\nCreated:    {}",
-                        m.id,
-                        m.memory_type,
-                        m.importance,
-                        m.confidence,
-                        m.tags.join(", "),
-                        m.created_at
-                    );
+                    match view_mode {
+                        ViewMode::Detail => {
+                            let details_chunks = Layout::default()
+                                .direction(Direction::Vertical)
+                                .constraints(
+                                    [Constraint::Length(7), Constraint::Min(0)].as_ref(),
+                                )
+                                .split(chunks[1]);
 
-                    let details_block = Paragraph::new(stats)
-                        .block(Block::default().borders(Borders::ALL).title(" Metadata "));
-                    f.render_widget(details_block, details_chunks[0]);
+                            let stats = format!(
+                                "ID:         {}\nType:       {}\nImportance: {:.2}\nConfidence: {:.2}\nTags:       {}\nCreated:    {}",
+                                m.id,
+                                m.memory_type,
+                                m.importance,
+                                m.confidence,
+                                m.tags.join(", "),
+                                m.created_at
+                            );
 
-                    let content_block = Paragraph::new(m.content.as_str())
-                        .wrap(Wrap { trim: true })
-                        .scroll((content_scroll, 0))
-                        .block(Block::default()
-                            .borders(Borders::ALL)
-                            .title(format!(" Content (Scroll: {}) ", content_scroll))
-                            .border_style(if active_panel == 1 { Style::default().fg(TuiColor::Yellow) } else { Style::default() }));
-                    f.render_widget(content_block, details_chunks[1]);
+                            f.render_widget(
+                                Paragraph::new(stats).block(
+                                    Block::default()
+                                        .borders(Borders::ALL)
+                                        .title(" Metadata  [g] Graph "),
+                                ),
+                                details_chunks[0],
+                            );
+
+                            f.render_widget(
+                                Paragraph::new(m.content.as_str())
+                                    .wrap(Wrap { trim: true })
+                                    .scroll((content_scroll, 0))
+                                    .block(
+                                        Block::default()
+                                            .borders(Borders::ALL)
+                                            .title(format!(" Content (↑↓ scroll: {}) ", content_scroll))
+                                            .border_style(right_border),
+                                    ),
+                                details_chunks[1],
+                            );
+                        }
+                        ViewMode::Graph => {
+                            let graph_text = build_graph_lines(m, &all_links, &memory_map);
+                            f.render_widget(
+                                Paragraph::new(graph_text)
+                                    .scroll((content_scroll, 0))
+                                    .block(
+                                        Block::default()
+                                            .borders(Borders::ALL)
+                                            .title(" Memory Graph  [g] Detail  [↑↓] scroll ")
+                                            .border_style(right_border),
+                                    ),
+                                chunks[1],
+                            );
+                        }
+                    }
                 }
             })?;
 
@@ -565,6 +606,14 @@ impl App {
                 if let Event::Key(key) = event::read()? {
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
+                        KeyCode::Char('g') => {
+                            view_mode = if view_mode == ViewMode::Detail {
+                                ViewMode::Graph
+                            } else {
+                                ViewMode::Detail
+                            };
+                            content_scroll = 0;
+                        }
                         KeyCode::Left | KeyCode::BackTab => {
                             active_panel = 0;
                         }
@@ -574,25 +623,29 @@ impl App {
                         KeyCode::Down => {
                             if active_panel == 0 {
                                 let i = match list_state.selected() {
-                                    Some(i) => if i >= memories.len() - 1 { 0 } else { i + 1 },
+                                    Some(i) => {
+                                        if i >= memories.len() - 1 { 0 } else { i + 1 }
+                                    }
                                     None => 0,
                                 };
                                 list_state.select(Some(i));
                                 content_scroll = 0;
                             } else {
-                                content_scroll += 1;
+                                content_scroll = content_scroll.saturating_add(1);
                             }
                         }
                         KeyCode::Up => {
                             if active_panel == 0 {
                                 let i = match list_state.selected() {
-                                    Some(i) => if i == 0 { memories.len() - 1 } else { i - 1 },
+                                    Some(i) => {
+                                        if i == 0 { memories.len() - 1 } else { i - 1 }
+                                    }
                                     None => 0,
                                 };
                                 list_state.select(Some(i));
                                 content_scroll = 0;
                             } else {
-                                if content_scroll > 0 { content_scroll -= 1; }
+                                content_scroll = content_scroll.saturating_sub(1);
                             }
                         }
                         _ => {}
@@ -601,13 +654,8 @@ impl App {
             }
         }
 
-        // Restore terminal
         disable_raw_mode()?;
-        execute!(
-            terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        )?;
+        execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
         terminal.show_cursor()?;
 
         Ok(())
@@ -705,6 +753,132 @@ impl App {
         
         Ok(())
     }
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum ViewMode {
+    Detail,
+    Graph,
+}
+
+fn tui_type_color(memory_type: &MemoryType) -> TuiColor {
+    match memory_type {
+        MemoryType::Working => TuiColor::Cyan,
+        MemoryType::Episodic => TuiColor::Blue,
+        MemoryType::Semantic => TuiColor::Green,
+        MemoryType::Tool => TuiColor::Magenta,
+        MemoryType::Failure => TuiColor::Red,
+        MemoryType::Preference => TuiColor::Yellow,
+    }
+}
+
+fn build_graph_lines(
+    memory: &MemoryRecord,
+    links: &[MemoryLink],
+    memory_map: &HashMap<Uuid, &MemoryRecord>,
+) -> Text<'static> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    lines.push(Line::from(vec![
+        Span::styled("Node  ".to_string(), Style::default().fg(TuiColor::DarkGray)),
+        Span::styled(
+            format!("{}…", &memory.id.to_string()[..8]),
+            Style::default().fg(TuiColor::Yellow),
+        ),
+        Span::styled(
+            format!("  ({})", memory.memory_type),
+            Style::default().fg(tui_type_color(&memory.memory_type)),
+        ),
+    ]));
+    lines.push(Line::from(Span::styled(
+        "─".repeat(38),
+        Style::default().fg(TuiColor::DarkGray),
+    )));
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(vec![
+        Span::styled("◉ ".to_string(), Style::default().fg(TuiColor::White).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("[{}] ", memory.memory_type),
+            Style::default().fg(tui_type_color(&memory.memory_type)).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("\"{}\"", memory.content.chars().take(50).collect::<String>()),
+            Style::default().fg(TuiColor::White),
+        ),
+    ]));
+
+    let outgoing: Vec<&MemoryLink> = links.iter().filter(|l| l.source_id == memory.id).collect();
+    let incoming: Vec<&MemoryLink> = links.iter().filter(|l| l.target_id == memory.id).collect();
+
+    if !outgoing.is_empty() {
+        lines.push(Line::from(Span::styled("│".to_string(), Style::default().fg(TuiColor::DarkGray))));
+        lines.push(Line::from(Span::styled(
+            "Outgoing:".to_string(),
+            Style::default().fg(TuiColor::DarkGray).add_modifier(Modifier::ITALIC),
+        )));
+
+        for (i, link) in outgoing.iter().enumerate() {
+            let connector = if i == outgoing.len() - 1 && incoming.is_empty() { "└" } else { "├" };
+            let label = memory_map
+                .get(&link.target_id)
+                .map(|t| format!("[{}] \"{}\"", t.memory_type, t.content.chars().take(35).collect::<String>()))
+                .unwrap_or_else(|| format!("[{}]", &link.target_id.to_string()[..8]));
+            let target_color = memory_map
+                .get(&link.target_id)
+                .map(|t| tui_type_color(&t.memory_type))
+                .unwrap_or(TuiColor::Gray);
+
+            lines.push(Line::from(vec![
+                Span::styled(format!("{}──[", connector), Style::default().fg(TuiColor::DarkGray)),
+                Span::styled(link.relation_type.clone(), Style::default().fg(TuiColor::Yellow)),
+                Span::styled("]──► ".to_string(), Style::default().fg(TuiColor::DarkGray)),
+                Span::styled(label, Style::default().fg(target_color)),
+            ]));
+        }
+    }
+
+    if !incoming.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Incoming:".to_string(),
+            Style::default().fg(TuiColor::DarkGray).add_modifier(Modifier::ITALIC),
+        )));
+
+        for (i, link) in incoming.iter().enumerate() {
+            let connector = if i == incoming.len() - 1 { "└" } else { "├" };
+            let label = memory_map
+                .get(&link.source_id)
+                .map(|s| format!("[{}] \"{}\"", s.memory_type, s.content.chars().take(35).collect::<String>()))
+                .unwrap_or_else(|| format!("[{}]", &link.source_id.to_string()[..8]));
+            let source_color = memory_map
+                .get(&link.source_id)
+                .map(|s| tui_type_color(&s.memory_type))
+                .unwrap_or(TuiColor::Gray);
+
+            lines.push(Line::from(vec![
+                Span::styled(format!("{}──[", connector), Style::default().fg(TuiColor::DarkGray)),
+                Span::styled(link.relation_type.clone(), Style::default().fg(TuiColor::Cyan)),
+                Span::styled("]──◄ ".to_string(), Style::default().fg(TuiColor::DarkGray)),
+                Span::styled(label, Style::default().fg(source_color)),
+            ]));
+        }
+    }
+
+    if outgoing.is_empty() && incoming.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "No links for this memory.".to_string(),
+            Style::default().fg(TuiColor::DarkGray),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Use: agent-memory link <src> <tgt> <relation>".to_string(),
+            Style::default().fg(TuiColor::DarkGray).add_modifier(Modifier::ITALIC),
+        )));
+    }
+
+    Text::from(lines)
 }
 
 fn parse_tags(tags: &str) -> Vec<String> {

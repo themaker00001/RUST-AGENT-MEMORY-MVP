@@ -204,6 +204,28 @@ impl SqliteMemoryStore {
         Ok(())
     }
 
+    pub async fn list_all_links(&self) -> Result<Vec<MemoryLink>> {
+        let rows = sqlx::query(
+            "SELECT source_id, target_id, relation_type FROM memory_links;",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list all memory links")?;
+
+        rows.into_iter()
+            .map(|row| {
+                let source_id: String = row.get("source_id");
+                let target_id: String = row.get("target_id");
+                let relation_type: String = row.get("relation_type");
+                Ok(MemoryLink {
+                    source_id: Uuid::parse_str(&source_id).context("invalid source_id")?,
+                    target_id: Uuid::parse_str(&target_id).context("invalid target_id")?,
+                    relation_type,
+                })
+            })
+            .collect()
+    }
+
     pub async fn get_linked_memories(&self, id: Uuid) -> Result<Vec<MemoryLink>> {
         let rows = sqlx::query(
             r#"
